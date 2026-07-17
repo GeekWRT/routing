@@ -15,24 +15,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup git identity
+      - name: Sync with upstream via merge API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.email "geekwrt@users.noreply.github.com"
-          git config user.name "GeekWRT"
-
-      - name: Sync with upstream
-        run: |
+          set -e
+          echo "Fetching upstream..."
           git remote add upstream https://github.com/openwrt/routing.git
           git fetch origin master
           git fetch upstream master
-          git checkout master
-          if git merge-base --is-ancestor origin/master upstream/master 2>/dev/null &&              git diff --quiet origin/master upstream/master 2>/dev/null; then
+
+          UPSTREAM=$(git rev-parse upstream/master)
+          FORK=$(git rev-parse origin/master)
+
+          if [ "$UPSTREAM" = "$FORK" ] || git merge-base --is-ancestor origin/master upstream/master 2>/dev/null; then
             echo "Already up to date"
             exit 0
           fi
-          git rebase upstream/master || {
-            echo "CONFLICT! aborting..."
-            git rebase --abort
-            exit 1
-          }
-          git push https://x-access-token:${{ secrets.GH_SYNC_TOKEN }}@github.com/${{ github.repository }}.git master --force
+
+          echo "Creating merge commit via API..."
+          RESULT=$(gh api repos/${{ github.repository }}/merges \
+            --field base="master" \
+            --field head="$UPSTREAM" \
+            --field commit_message="Merge upstream/master into master" 2>&1)
+
+          if echo "$RESULT" | jq -e '.sha' > /dev/null 2>&1; then
+            NEW_SHA=$(echo "$RESULT" | jq -r '.sha')
+            echo "✅ Synced to: $NEW_SHA"
+          elif echo "$RESULT" | jq -e '.message' > /dev/null 2>&1; then
+            echo "⚠️ $(echo "$RESULT" | jq -r '.message')"
+          else
+            echo "Result: $RESULT"
+          fi
