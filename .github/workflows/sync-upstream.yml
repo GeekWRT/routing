@@ -22,7 +22,7 @@ jobs:
 
       - name: Sync with upstream
         run: |
-          git remote add upstream https://github.com/openwrt/$repo.git
+          git remote add upstream https://github.com/openwrt/routing.git
           git fetch origin master
           git fetch upstream master
           git checkout master
