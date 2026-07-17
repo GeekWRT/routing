@@ -15,69 +15,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Sync with upstream via Git Data API
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Setup git identity
         run: |
-          set -e
-          REPO="${{ github.repository }}"
-          echo "Fetching upstream..."
+          git config user.email "geekwrt@users.noreply.github.com"
+          git config user.name "GeekWRT"
+
+      - name: Sync with upstream
+        run: |
           git remote add upstream https://github.com/openwrt/routing.git
           git fetch origin master
           git fetch upstream master
-
-          UPSTREAM=$(git rev-parse upstream/master)
-          FORK=$(git rev-parse origin/master)
-
-          if [ "$UPSTREAM" = "$FORK" ] || git merge-base --is-ancestor origin/master upstream/master 2>/dev/null; then
+          git checkout master
+          if git merge-base --is-ancestor origin/master upstream/master 2>/dev/null &&              git diff --quiet origin/master upstream/master 2>/dev/null; then
             echo "Already up to date"
             exit 0
           fi
-
-          # Get upstream tree
-          echo "Fetching upstream tree..."
-          gh api "repos/$REPO/git/trees/$UPSTREAM?recursive=1" -q '.tree' > /tmp/tree.json
-
-          # For each changed file, replace in tree JSON
-          git diff --name-only $UPSTREAM..$FORK | while read -r f; do
-            [ -z "$f" ] && continue
-            echo "Processing: $f"
-            CONTENT=$(git show $FORK:$f | base64 -w0)
-            BLOB=$(gh api "repos/$REPO/git/blobs" \
-              --field content="$CONTENT" \
-              --field encoding="base64" \
-              --jq '.sha')
-            # Replace this file's SHA in the tree JSON
-            jq --arg p "$f" --arg s "$BLOB" '(.[] | select(.path == $p) | .sha) |= $s' /tmp/tree.json > /tmp/tree2.json
-            mv /tmp/tree2.json /tmp/tree.json
-          done
-
-          # Create tree on GitHub
-          echo "Creating tree..."
-          NEW_TREE=$(gh api "repos/$REPO/git/trees" \
-            --field tree="$(cat /tmp/tree.json | jq -c '.')" \
-            --jq '.sha')
-
-          # Create merge commit
-          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          echo "Creating commit..."
-          MERGE_SHA=$(gh api "repos/$REPO/git/commits" \
-            --field message="Merge upstream/master into master" \
-            --field tree="$NEW_TREE" \
-            --field parents[]="$UPSTREAM" \
-            --field parents[]="$FORK" \
-            --field 'author[name]=GeekWRT' \
-            --field 'author[email]=geekwrt@users.noreply.github.com' \
-            --field 'author[date]=$NOW' \
-            --field 'committer[name]=GeekWRT' \
-            --field 'committer[email]=geekwrt@users.noreply.github.com' \
-            --field 'committer[date]=$NOW' \
-            --jq '.sha')
-
-          # Update ref
-          echo "Updating ref..."
-          gh api -X PATCH "repos/$REPO/git/refs/heads/master" \
-            --field sha="$MERGE_SHA" \
-            --field force=true \
-            --jq '.object.sha'
-          echo "Synced: $MERGE_SHA"
+          git rebase upstream/master || {
+            echo "CONFLICT! aborting..."
+            git rebase --abort
+            exit 1
+          }
+          git push https://x-access-token:${{ secrets.GH_SYNC_TOKEN }}@github.com/${{ github.repository }}.git master --force
