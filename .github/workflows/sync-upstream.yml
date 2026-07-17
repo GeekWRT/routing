@@ -34,54 +34,33 @@ jobs:
             exit 0
           fi
 
-          # Get upstream's full tree
+          # Get upstream tree
           echo "Fetching upstream tree..."
-          gh api "repos/$REPO/git/trees/$UPSTREAM?recursive=1" > /tmp/upstream_tree.json
+          gh api "repos/$REPO/git/trees/$UPSTREAM?recursive=1" -q '.tree' > /tmp/tree.json
 
-          # Get changed files
-          CHANGED=$(git diff --name-only $UPSTREAM..$FORK)
-          echo "Changed files:"
-          echo "$CHANGED"
-
-          # Build tree entries: start with upstream tree, then override changed files
-          # First create blobs for changed files
-          declare -A BLOB_MAP
-          while IFS= read -r f; do
+          # For each changed file, replace in tree JSON
+          git diff --name-only $UPSTREAM..$FORK | while read -r f; do
             [ -z "$f" ] && continue
+            echo "Processing: $f"
             CONTENT=$(git show $FORK:$f | base64 -w0)
             BLOB=$(gh api "repos/$REPO/git/blobs" \
               --field content="$CONTENT" \
               --field encoding="base64" \
               --jq '.sha')
-            BLOB_MAP["$f"]="$BLOB"
-            echo "  $f -> $BLOB"
-          done <<< "$CHANGED"
-
-          # Build tree JSON: update our files in upstream tree
-          TREE_JSON="[]"
-          jq -c '.tree[]' /tmp/upstream_tree.json | while read -r entry; do
-            path=$(echo "$entry" | jq -r '.path')
-            # Check if this file is in our changed list
-            if [[ -v BLOB_MAP["$path"] ]]; then
-              new_sha="${BLOB_MAP[$path]}"
-            else
-              new_sha=$(echo "$entry" | jq -r '.sha')
-            fi
-            mode=$(echo "$entry" | jq -r '.mode')
-            type=$(echo "$entry" | jq -r '.type')
-            # Append to tree
-            printf '%s\n' "{\"path\":\"$path\",\"mode\":\"$mode\",\"type\":\"$type\",\"sha\":\"$new_sha\"}"
-          done | jq -s '.' > /tmp/new_tree_entries.json
+            # Replace this file's SHA in the tree JSON
+            jq --arg p "$f" --arg s "$BLOB" '(.[] | select(.path == $p) | .sha) |= $s' /tmp/tree.json > /tmp/tree2.json
+            mv /tmp/tree2.json /tmp/tree.json
+          done
 
           # Create tree on GitHub
           echo "Creating tree..."
           NEW_TREE=$(gh api "repos/$REPO/git/trees" \
-            --field tree="$(cat /tmp/new_tree_entries.json)" \
+            --field tree="$(cat /tmp/tree.json | jq -c '.')" \
             --jq '.sha')
 
           # Create merge commit
           NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          echo "Creating merge commit..."
+          echo "Creating commit..."
           MERGE_SHA=$(gh api "repos/$REPO/git/commits" \
             --field message="Merge upstream/master into master" \
             --field tree="$NEW_TREE" \
@@ -96,10 +75,9 @@ jobs:
             --jq '.sha')
 
           # Update ref
-          echo "Updating master ref..."
+          echo "Updating ref..."
           gh api -X PATCH "repos/$REPO/git/refs/heads/master" \
             --field sha="$MERGE_SHA" \
             --field force=true \
             --jq '.object.sha'
-
-          echo "Synced to: $MERGE_SHA"
+          echo "Synced: $MERGE_SHA"
