@@ -1,0 +1,82 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync with upstream via Git Data API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          REPO="${{ github.repository }}"
+          echo "Fetching upstream..."
+          git remote add upstream https://github.com/openwrt/routing.git
+          git fetch origin master
+          git fetch upstream master
+
+          UPSTREAM=$(git rev-parse upstream/master)
+          FORK=$(git rev-parse origin/master)
+
+          if [ "$UPSTREAM" = "$FORK" ] || git merge-base --is-ancestor origin/master upstream/master 2>/dev/null; then
+            echo "Already up to date"
+            exit 0
+          fi
+
+          # Get upstream tree SHA
+          UPSTREAM_TREE=$(gh api "repos/$REPO/git/commits/$UPSTREAM" --jq '.tree.sha')
+          # Get files changed by our commits
+          CHANGED_FILES=$(git diff --name-only $UPSTREAM..$FORK)
+
+          # Create blobs and build tree entries
+          TREE_JSON="[]"
+          FIRST=true
+          while IFS= read -r filepath; do
+            [ -z "$filepath" ] && continue
+            CONTENT=$(git show $FORK:$filepath | base64 -w0)
+            BLOB_SHA=$(gh api "repos/$REPO/git/blobs" \
+              --field content="$CONTENT" \
+              --field encoding="base64" \
+              --jq '.sha')
+            TREE_JSON=$(echo "$TREE_JSON" | jq --arg path "$filepath" --arg sha "$BLOB_SHA" '. += [{"path": $path, "mode": "100644", "type": "blob", "sha": $sha}]')
+          done <<< "$CHANGED_FILES"
+
+          # Create new tree
+          NEW_TREE=$(gh api "repos/$REPO/git/trees" \
+            --field base_tree="$UPSTREAM_TREE" \
+            --field tree="$TREE_JSON" \
+            --jq '.sha')
+
+          # Create merge commit
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          MERGE_SHA=$(gh api "repos/$REPO/git/commits" \
+            --field message="Merge upstream/master into master" \
+            --field tree="$NEW_TREE" \
+            --field parents[]="$UPSTREAM" \
+            --field parents[]="$FORK" \
+            --field 'author[name]=GeekWRT' \
+            --field 'author[email]=geekwrt@users.noreply.github.com' \
+            --field 'author[date]=$NOW' \
+            --field 'committer[name]=GeekWRT' \
+            --field 'committer[email]=geekwrt@users.noreply.github.com' \
+            --field 'committer[date]=$NOW' \
+            --jq '.sha')
+
+          # Update master ref
+          gh api -X PATCH "repos/$REPO/git/refs/heads/master" \
+            --field sha="$MERGE_SHA" \
+            --field force=true \
+            --jq '.object.sha'
+
+          echo "Synced to: $MERGE_SHA"
