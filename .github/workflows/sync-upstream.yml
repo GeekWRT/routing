@@ -8,6 +8,8 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -16,8 +18,12 @@ jobs:
       - name: Sync with upstream
         run: |
           git remote add upstream https://github.com/openwrt/routing.git
+          git fetch origin master
           git fetch upstream master
           git checkout master
-          git merge --ff-only upstream/master && \
-            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git master || \
-            echo "Not fast-forward, skipping"
+          git rebase upstream/master || {
+            echo "CONFLICT! aborting..."
+            git rebase --abort
+            exit 1
+          }
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git master --force
